@@ -1,0 +1,6 @@
+backup/
+backup/*
+test/
+test/*
+.DS_Store
+Thumbs.db

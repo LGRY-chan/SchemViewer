@@ -1,0 +1,626 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SchemViewer — 3D Litematic Viewer</title>
+    <meta name="description" content="Drag & drop any .litematic file for instant 3D WebGL preview. 100% client-side, no upload required.">
+
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['"Plus Jakarta Sans"', 'sans-serif'],
+                        title: ['"Space Grotesk"', 'sans-serif'],
+                    },
+                    colors: {
+                        brand: {
+                            50: '#f0fbf4', 100: '#dcf6e7', 200: '#bbeccf',
+                            300: '#89dda8', 400: '#52c57c', 500: '#2eab5c',
+                            600: '#208b47', 700: '#1c6e3b', 800: '#1a5731',
+                            900: '#16482a', 950: '#0b2817',
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script src="https://unpkg.com/gl-matrix@3.4.3/gl-matrix-min.js"></script>
+    <script src="https://unpkg.com/deepslate@0.26.0"></script>
+
+    <!-- Global JS Error Toast -->
+    <script>
+        window.addEventListener('error', function(e) {
+            const d = document.createElement('div');
+            d.className = 'fixed bottom-4 right-4 z-[100] bg-red-950 border border-red-800 text-red-200 p-3 rounded-xl shadow-2xl max-w-xs text-xs font-mono';
+            d.innerHTML = `<b class="text-red-400">JS Error</b><br>${e.message || 'unknown'}<br><span class="text-red-600">${(e.filename||'').split('/').pop()}:${e.lineno}</span>
+                           <button onclick="this.parentElement.remove()" class="ml-2 text-red-500 hover:text-white">✕</button>`;
+            document.body.appendChild(d);
+        });
+    </script>
+
+    <style>
+        * { box-sizing: border-box; }
+
+        /* ── Landing screen ─────────────────────────────────── */
+        #landing-screen {
+            position: fixed; inset: 0; z-index: 50;
+            background: #080f18;
+            display: flex; flex-direction: column;
+            align-items: center; justify-content: center;
+            transition: opacity .4s ease, transform .4s ease;
+        }
+        #landing-screen.hidden-out {
+            opacity: 0; transform: scale(1.04); pointer-events: none;
+        }
+
+        /* ── Viewer app shell ───────────────────────────────── */
+        #app-shell {
+            position: fixed; inset: 0;
+            display: flex; flex-direction: column;
+            background: #0b1220;
+            opacity: 0; pointer-events: none;
+            transition: opacity .4s ease .1s;
+        }
+        #app-shell.visible { opacity: 1; pointer-events: all; }
+
+        /* ── Sidebar ────────────────────────────────────────── */
+        #sidebar {
+            width: 320px; flex-shrink: 0;
+            background: #111827;
+            border-left: 1px solid rgba(255,255,255,.06);
+            display: flex; flex-direction: column;
+            transition: transform .3s cubic-bezier(.4,0,.2,1), width .3s cubic-bezier(.4,0,.2,1);
+            overflow: hidden;
+        }
+        #sidebar.collapsed {
+            transform: translateX(320px);
+            width: 0;
+        }
+
+        /* On narrow screens, sidebar floats as an overlay over the canvas */
+        @media (max-width: 767px) {
+            #sidebar {
+                position: absolute;
+                top: 0; right: 0; bottom: 0;
+                z-index: 30;
+                box-shadow: -8px 0 32px rgba(0,0,0,.6);
+                /* Start collapsed on mobile */
+                transform: translateX(320px);
+                width: 300px;
+            }
+            #sidebar.open-mobile {
+                transform: translateX(0);
+            }
+        }
+
+        /* ── Scrollbars ─────────────────────────────────────── */
+        ::-webkit-scrollbar { width: 4px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: rgba(255,255,255,.12); border-radius: 2px; }
+
+        /* ── Canvas ─────────────────────────────────────────── */
+        #preview-canvas { display: block; width: 100%; height: 100%; }
+
+        /* ── Dropzone active ─────────────────────────────────── */
+        .drop-active { border-color: #2eab5c !important; background: rgba(46,171,92,.06) !important; }
+
+        /* ── Noise texture overlay on landing ───────────────── */
+        #landing-screen::before {
+            content: '';
+            position: absolute; inset: 0;
+            background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E");
+            pointer-events: none; opacity: .5;
+        }
+
+        /* ── Glow blobs ─────────────────────────────────────── */
+        .blob {
+            position: absolute; border-radius: 50%; filter: blur(80px);
+            pointer-events: none; animation: drift 12s ease-in-out infinite alternate;
+        }
+        @keyframes drift { from { transform: translate(0,0) scale(1); } to { transform: translate(30px,-20px) scale(1.08); } }
+
+        /* ── Tab buttons ────────────────────────────────────── */
+        .tab-btn { transition: color .15s, border-color .15s; }
+        .tab-btn.active { color: #2eab5c; border-bottom-color: #2eab5c; }
+
+        /* ── Material row ─────────────────────────────────────── */
+        .mat-row:hover { background: rgba(255,255,255,.04); }
+
+        /* ── Progress bar ────────────────────────────────────── */
+        #checklist-progress-bar { transition: width .3s ease; }
+
+        /* ── Camera controls tooltip ──────────────────────────── */
+        .cam-btn { transition: background .15s, color .15s; }
+        .cam-btn:hover { background: rgba(255,255,255,.1); color: #fff; }
+    </style>
+</head>
+<body class="h-full font-sans antialiased text-slate-100 overflow-hidden">
+
+<!-- ═══════════════════════════════════════════════════════════
+     LANDING SCREEN  (shown until first file is loaded)
+════════════════════════════════════════════════════════════════ -->
+<div id="landing-screen">
+    <!-- Background blobs -->
+    <div class="blob w-96 h-96 bg-brand-700/20 top-1/4 -left-32" style="animation-delay:0s"></div>
+    <div class="blob w-80 h-80 bg-emerald-500/10 bottom-1/4 -right-24" style="animation-delay:3s"></div>
+
+    <!-- Logo -->
+    <div class="flex items-center gap-3 mb-10 z-10">
+        <div class="w-12 h-12 rounded-2xl bg-gradient-to-br from-brand-500 to-emerald-300 flex items-center justify-center shadow-lg shadow-brand-900/50">
+            <i data-lucide="box" class="w-6 h-6 text-white"></i>
+        </div>
+        <div>
+            <h1 class="text-2xl font-extrabold font-title text-white tracking-tight">SchemViewer</h1>
+            <p class="text-xs text-slate-500 font-medium">3D Litematic Viewer · Client-Side</p>
+        </div>
+    </div>
+
+    <!-- Drop zone -->
+    <div id="dropzone-landing"
+         class="relative z-10 w-full max-w-lg mx-auto border-2 border-dashed border-slate-700 rounded-3xl p-12 text-center cursor-pointer group transition-all duration-300 hover:border-brand-500 hover:bg-brand-500/5"
+         style="backdrop-filter: blur(16px); background: rgba(17,24,39,0.7);">
+        <input type="file" id="file-input" accept=".litematic" class="absolute inset-0 w-full h-full opacity-0 cursor-pointer">
+
+        <div class="pointer-events-none space-y-5">
+            <div class="w-20 h-20 rounded-2xl bg-slate-800 border border-slate-700 flex items-center justify-center mx-auto group-hover:bg-brand-900/60 group-hover:border-brand-700 transition-all duration-300">
+                <i data-lucide="upload-cloud" class="w-9 h-9 text-slate-500 group-hover:text-brand-400 transition-colors duration-300"></i>
+            </div>
+
+            <div>
+                <p class="text-lg font-bold text-white">Drop a .litematic file here</p>
+                <p class="text-sm text-slate-500 mt-1.5">or click to browse — 100% offline, nothing is uploaded</p>
+            </div>
+
+
+        </div>
+    </div>
+
+    <!-- Loading state (shown while parsing) -->
+    <div id="landing-loading" class="hidden z-10 mt-10 flex flex-col items-center gap-4">
+        <div class="relative w-12 h-12">
+            <div class="absolute inset-0 rounded-full border-2 border-slate-800"></div>
+            <div class="absolute inset-0 rounded-full border-2 border-t-brand-500 border-r-transparent border-b-transparent border-l-transparent animate-spin"></div>
+        </div>
+        <p class="text-sm text-slate-400" id="loading-step">Decompressing &amp; parsing...</p>
+    </div>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════════
+     APP SHELL  (shown after first file load)
+════════════════════════════════════════════════════════════════ -->
+<div id="app-shell">
+
+    <!-- ── Top bar ── -->
+    <header class="flex-shrink-0 h-11 flex items-center justify-between gap-2 px-3 border-b border-white/5 bg-slate-900/80 backdrop-blur-md z-20">
+
+        <!-- Left: logo + file name -->
+        <div class="flex items-center gap-2 min-w-0 flex-shrink-0">
+            <div class="w-7 h-7 rounded-lg bg-gradient-to-br from-brand-500 to-emerald-300 flex items-center justify-center shadow-sm flex-shrink-0">
+                <i data-lucide="box" class="w-3.5 h-3.5 text-white"></i>
+            </div>
+            <!-- "SchemViewer" text: hidden on very small screens -->
+            <span class="hidden sm:inline text-sm font-bold font-title text-white tracking-wide">SchemViewer</span>
+            <!-- Divider + filename: hidden on small screens -->
+            <div class="hidden sm:block h-4 w-px bg-white/10 flex-shrink-0"></div>
+            <span id="topbar-filename" class="hidden sm:block text-xs text-slate-400 font-medium truncate max-w-[120px] md:max-w-[200px]">—</span>
+        </div>
+
+        <!-- Right: controls (contains both Open File and camera controls) -->
+        <div class="flex items-center gap-1.5 flex-shrink-0 ml-auto">
+            <!-- Open file button -->
+            <label class="relative flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-white/5 border border-white/8 hover:bg-white/10 cursor-pointer transition text-xs font-semibold text-slate-300 hover:text-white flex-shrink-0 whitespace-nowrap">
+                <i data-lucide="upload" class="w-3.5 h-3.5 flex-shrink-0"></i>
+                <span class="hidden sm:inline">Open file</span>
+                <input type="file" id="file-input-topbar" accept=".litematic" class="absolute inset-0 opacity-0 cursor-pointer w-full h-full">
+            </label>
+
+            <div class="hidden md:block h-4 w-px bg-white/10 mx-0.5"></div>
+
+            <!-- Camera rotate buttons: hidden on small screens (use touch gestures) -->
+            <button onclick="rotateCamera('left')"  title="Rotate Left"  class="hidden md:flex cam-btn p-1.5 rounded-lg text-slate-500"><i data-lucide="rotate-ccw" class="w-3.5 h-3.5"></i></button>
+            <button onclick="rotateCamera('right')" title="Rotate Right" class="hidden md:flex cam-btn p-1.5 rounded-lg text-slate-500"><i data-lucide="rotate-cw"  class="w-3.5 h-3.5"></i></button>
+            <button onclick="rotateCamera('up')"    title="Tilt Up"      class="hidden md:flex cam-btn p-1.5 rounded-lg text-slate-500"><i data-lucide="arrow-up"   class="w-3.5 h-3.5"></i></button>
+            <button onclick="rotateCamera('down')"  title="Tilt Down"    class="hidden md:flex cam-btn p-1.5 rounded-lg text-slate-500"><i data-lucide="arrow-down" class="w-3.5 h-3.5"></i></button>
+
+            <div class="hidden md:block h-4 w-px bg-white/10 mx-0.5"></div>
+
+            <!-- Sidebar toggle: always visible -->
+            <button id="sidebar-toggle" onclick="toggleSidebar()" title="Toggle Info Panel"
+                    class="cam-btn p-1.5 rounded-lg text-slate-400 bg-white/5 border border-white/8">
+                <i data-lucide="panel-right" class="w-3.5 h-3.5"></i>
+            </button>
+        </div>
+    </header>
+
+    <!-- ── Main area ── -->
+    <div class="flex flex-1 overflow-hidden">
+
+        <!-- Canvas area (fills remaining space) -->
+        <div class="relative flex-1 bg-[#080f18] overflow-hidden" id="canvas-wrapper">
+            <canvas id="preview-canvas" class="cursor-grab active:cursor-grabbing"></canvas>
+            
+            <!-- Y-Axis Slicer Floating Panel (Vertical, left side of canvas) -->
+            <div class="absolute top-4 left-4 z-20 bg-slate-950/80 backdrop-blur-md border border-white/5 p-2 rounded-2xl w-14 h-96 flex flex-col items-center shadow-2xl select-none" id="y-slicer-panel">
+                <!-- Header Icon -->
+                <div class="flex-shrink-0 mb-1 text-slate-400 animate-pulse" title="Y-Axis Slicer">
+                    <i data-lucide="layers" class="w-4 h-4 text-brand-400"></i>
+                </div>
+                
+                <!-- Max value adjustments -->
+                <div class="flex flex-col items-center gap-0.5 mb-1.5 flex-shrink-0">
+                    <button onclick="adjustSliceY('max', 1)" class="text-slate-500 hover:text-brand-400 transition p-0.5"><i data-lucide="chevron-up" class="w-3.5 h-3.5"></i></button>
+                    <span id="y-slice-max-label" class="text-[9px] font-extrabold text-brand-300 font-mono leading-none">0</span>
+                    <button onclick="adjustSliceY('max', -1)" class="text-slate-500 hover:text-brand-400 transition p-0.5"><i data-lucide="chevron-down" class="w-3.5 h-3.5"></i></button>
+                </div>
+
+                <!-- Dual Range Slider Container (Vertical) -->
+                <div class="relative flex-1 w-5 flex justify-center items-center">
+                    <!-- Outer track line (Vertical) -->
+                    <div class="absolute w-1 h-full bg-slate-800 rounded-full"></div>
+                    <!-- Selected active range track (Vertical) -->
+                    <div id="y-slider-track" class="absolute w-1 bg-gradient-to-b from-brand-500 to-emerald-400 rounded-full" style="top: 0%; height: 100%;"></div>
+                    
+                    <!-- Min range input (Vertical) -->
+                    <input type="range" id="y-slider-min" value="0" min="0" max="0" step="1"
+                           oninput="onYSliderInput('min')"
+                           class="absolute w-5 h-full appearance-none bg-transparent pointer-events-none focus:outline-none z-30"
+                           style="writing-mode: vertical-lr; direction: rtl;">
+                           
+                    <!-- Max range input (Vertical) -->
+                    <input type="range" id="y-slider-max" value="0" min="0" max="0" step="1"
+                           oninput="onYSliderInput('max')"
+                           class="absolute w-5 h-full appearance-none bg-transparent pointer-events-none focus:outline-none z-30"
+                           style="writing-mode: vertical-lr; direction: rtl;">
+                </div>
+                
+                <!-- Min value adjustments -->
+                <div class="flex flex-col items-center gap-0.5 mt-1.5 flex-shrink-0">
+                    <button onclick="adjustSliceY('min', 1)" class="text-slate-500 hover:text-brand-400 transition p-0.5"><i data-lucide="chevron-up" class="w-3.5 h-3.5"></i></button>
+                    <span id="y-slice-min-label" class="text-[9px] font-extrabold text-brand-300 font-mono leading-none">0</span>
+                    <button onclick="adjustSliceY('min', -1)" class="text-slate-500 hover:text-brand-400 transition p-0.5"><i data-lucide="chevron-down" class="w-3.5 h-3.5"></i></button>
+                </div>
+                
+                <style>
+                    #y-slider-min::-webkit-slider-thumb {
+                        appearance: none; pointer-events: auto;
+                        width: 14px; height: 14px; border-radius: 50%;
+                        background: #52c57c; border: 2px solid #fff; cursor: pointer;
+                        box-shadow: 0 0 8px rgba(0,0,0,0.5);
+                    }
+                    #y-slider-max::-webkit-slider-thumb {
+                        appearance: none; pointer-events: auto;
+                        width: 14px; height: 14px; border-radius: 50%;
+                        background: #52c57c; border: 2px solid #fff; cursor: pointer;
+                        box-shadow: 0 0 8px rgba(0,0,0,0.5);
+                    }
+                    #y-slider-min::-moz-range-thumb {
+                        pointer-events: auto;
+                        width: 14px; height: 14px; border-radius: 50%;
+                        background: #52c57c; border: 2px solid #fff; cursor: pointer;
+                        box-shadow: 0 0 8px rgba(0,0,0,0.5);
+                    }
+                    #y-slider-max::-moz-range-thumb {
+                        pointer-events: auto;
+                        width: 14px; height: 14px; border-radius: 50%;
+                        background: #52c57c; border: 2px solid #fff; cursor: pointer;
+                        box-shadow: 0 0 8px rgba(0,0,0,0.5);
+                    }
+                </style>
+            </div>
+
+            <div id="entity-labels-container" class="absolute inset-0 pointer-events-none overflow-hidden select-none"></div>
+            <img id="atlas" alt="atlas" hidden>
+
+            <!-- Renderer status badge -->
+            <div class="absolute bottom-4 left-4 pointer-events-none">
+                <span class="inline-flex items-center gap-1.5 px-2.5 py-1 bg-slate-950/80 backdrop-blur-md rounded-lg text-[9px] font-bold text-slate-400 border border-white/5">
+                    <span id="renderer-status-dot" class="h-1.5 w-1.5 rounded-full bg-amber-500 animate-pulse"></span>
+                    <span id="renderer-status-text">Loading...</span>
+                </span>
+            </div>
+
+            <!-- Quick stats overlay (bottom right) -->
+            <div class="absolute bottom-4 right-4 pointer-events-none flex items-center gap-2">
+                <span class="px-2.5 py-1 bg-slate-950/80 backdrop-blur-md rounded-lg text-[9px] font-bold text-slate-400 border border-white/5">
+                    <span id="overlay-size">—</span>
+                </span>
+                <span class="px-2.5 py-1 bg-slate-950/80 backdrop-blur-md rounded-lg text-[9px] font-bold text-slate-400 border border-white/5">
+                    <span id="overlay-blocks">—</span> blocks
+                </span>
+            </div>
+        </div>
+
+        <!-- ── Sidebar ── -->
+        <aside id="sidebar" class="flex flex-col">
+            <!-- Sidebar header -->
+            <div class="flex-shrink-0 px-5 pt-4 pb-3 border-b border-white/6">
+                <p id="sidebar-schematic-name" class="text-xs font-bold text-white truncate">—</p>
+                <p class="text-[10px] text-slate-500 mt-0.5">Loaded in browser memory</p>
+            </div>
+
+            <!-- Tabs -->
+            <div class="flex-shrink-0 flex border-b border-white/6 px-2">
+                <button onclick="switchTab('overview')"  id="tab-overview"
+                        class="tab-btn active flex-1 py-2.5 text-xs font-semibold text-slate-400 border-b-2 border-transparent">
+                    Overview
+                </button>
+                <button onclick="switchTab('materials')" id="tab-materials"
+                        class="tab-btn flex-1 py-2.5 text-xs font-semibold text-slate-400 border-b-2 border-transparent flex items-center justify-center gap-1">
+                    Materials
+                    <span id="material-count-badge" class="px-1.5 py-0.5 rounded bg-slate-700 text-[9px] font-bold text-slate-300">0</span>
+                </button>
+                <button onclick="switchTab('export')"    id="tab-export"
+                        class="tab-btn flex-1 py-2.5 text-xs font-semibold text-slate-400 border-b-2 border-transparent">
+                    Export
+                </button>
+            </div>
+
+            <!-- Scrollable panel area -->
+            <div class="flex-1 overflow-y-auto">
+
+                <!-- ── Overview Panel ── -->
+                <div id="panel-overview" class="p-4 space-y-4">
+
+                    <!-- Stats grid -->
+                    <div class="grid grid-cols-2 gap-2">
+                        <div class="bg-slate-800/60 rounded-xl p-3 border border-white/5">
+                            <p class="text-[9px] text-slate-500 uppercase font-bold tracking-wider mb-1">Dimensions</p>
+                            <p class="text-xs font-extrabold text-white" id="info-size">—</p>
+                        </div>
+                        <div class="bg-slate-800/60 rounded-xl p-3 border border-white/5">
+                            <p class="text-[9px] text-slate-500 uppercase font-bold tracking-wider mb-1">Total Blocks</p>
+                            <p class="text-xs font-extrabold text-white" id="info-total-blocks">—</p>
+                        </div>
+                        <div class="bg-slate-800/60 rounded-xl p-3 border border-white/5">
+                            <p class="text-[9px] text-slate-500 uppercase font-bold tracking-wider mb-1">Volume</p>
+                            <p class="text-xs font-extrabold text-white" id="info-volume">—</p>
+                        </div>
+                        <div class="bg-slate-800/60 rounded-xl p-3 border border-white/5">
+                            <p class="text-[9px] text-slate-500 uppercase font-bold tracking-wider mb-1">Entities</p>
+                            <p class="text-xs font-extrabold text-white" id="info-entities">—</p>
+                        </div>
+                    </div>
+
+                    <!-- Metadata -->
+                    <div class="bg-slate-800/40 rounded-xl border border-white/5 divide-y divide-white/5">
+                        <div class="flex items-center justify-between px-4 py-2.5">
+                            <span class="text-[10px] text-slate-500">Author</span>
+                            <span class="text-[10px] font-semibold text-slate-200" id="meta-author">—</span>
+                        </div>
+                        <div class="flex items-center justify-between px-4 py-2.5">
+                            <span class="text-[10px] text-slate-500">MC Version</span>
+                            <span class="text-[10px] font-semibold text-slate-200" id="meta-mc-version">—</span>
+                        </div>
+                        <div class="flex items-center justify-between px-4 py-2.5">
+                            <span class="text-[10px] text-slate-500">Regions</span>
+                            <span class="text-[10px] font-semibold text-slate-200" id="meta-regions">—</span>
+                        </div>
+                        <div class="flex items-center justify-between px-4 py-2.5">
+                            <span class="text-[10px] text-slate-500">Opened</span>
+                            <span class="text-[10px] font-semibold text-slate-200" id="meta-date">—</span>
+                        </div>
+                        <div class="flex items-center justify-between px-4 py-2.5">
+                            <span class="text-[10px] text-slate-500">File</span>
+                            <span class="text-[10px] font-semibold text-slate-200 truncate max-w-[140px]" id="info-region-name">—</span>
+                        </div>
+                    </div>
+
+                    <!-- Visibility / Render Controls -->
+                    <div class="bg-slate-800/40 rounded-xl p-3 border border-white/5 space-y-3">
+                        <p class="text-[9px] text-slate-500 uppercase font-bold tracking-wider">Visibility Controls</p>
+                        
+                        <!-- Entities Switch -->
+                        <div class="flex items-center justify-between py-1 border-b border-white/5">
+                            <span class="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+                                <i data-lucide="ghost" class="w-3.5 h-3.5 text-slate-400"></i>
+                                Render Entities
+                            </span>
+                            <label class="relative inline-flex items-center cursor-pointer">
+                                <input type="checkbox" id="toggle-entities" checked onchange="toggleEntityVisibility()" class="sr-only peer">
+                                <div class="w-7 h-4 bg-slate-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-brand-500"></div>
+                            </label>
+                        </div>
+
+                        <!-- Technical Mode Switch -->
+                        <div class="flex items-center justify-between py-1 border-b border-white/5">
+                            <span class="text-xs font-semibold text-slate-300 flex items-center gap-1.5" title="Switch between default and customized atlas.png">
+                                <i data-lucide="wrench" class="w-3.5 h-3.5 text-slate-400"></i>
+                                Use Technical Mode
+                            </span>
+                            <label class="relative inline-flex items-center cursor-pointer">
+                                <input type="checkbox" id="toggle-technical-mode" onchange="toggleTechnicalMode()" class="sr-only peer" checked>
+                                <div class="w-7 h-4 bg-slate-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-brand-500"></div>
+                            </label>
+                        </div>
+                        
+                        <!-- Regions List Header -->
+                        <div class="space-y-2">
+                            <span class="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+                                <i data-lucide="map" class="w-3.5 h-3.5 text-slate-400"></i>
+                                Regions Visibility
+                            </span>
+                            <div id="regions-visibility-list" class="space-y-1 max-h-32 overflow-y-auto pr-1">
+                                <p class="text-[10px] text-slate-600 italic">No schematic loaded</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- MC version badge -->
+                    <div class="flex items-center gap-2 p-3 bg-brand-950/60 border border-brand-900/60 rounded-xl">
+                        <i data-lucide="server" class="w-4 h-4 text-brand-400 flex-shrink-0"></i>
+                        <p class="text-[10px] text-brand-300 leading-relaxed">
+                            Rendered client-side using <span class="font-bold">Deepslate</span> WebGL engine.
+                            No data leaves your browser.
+                        </p>
+                    </div>
+                </div>
+
+                <!-- ── Materials Panel ── -->
+                <div id="panel-materials" class="hidden flex flex-col h-full">
+                    <div class="p-4 pb-2 space-y-3">
+                        <!-- Search -->
+                        <div class="relative">
+                            <i data-lucide="search" class="w-3.5 h-3.5 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2"></i>
+                            <input type="text" id="material-search" oninput="renderMaterialsList()"
+                                   placeholder="Search blocks..."
+                                   class="w-full bg-slate-800 border border-white/8 rounded-xl pl-8 pr-3 py-2 text-xs text-slate-200 placeholder:text-slate-600 focus:outline-none focus:border-brand-600 transition">
+                        </div>
+                        <!-- Progress -->
+                        <div class="flex items-center justify-between">
+                            <span id="checklist-progress-text" class="text-[10px] text-slate-500">0 / 0 collected</span>
+                            <div class="w-28 h-1 bg-slate-700 rounded-full overflow-hidden">
+                                <div id="checklist-progress-bar" class="bg-brand-500 h-full w-0 rounded-full"></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Table -->
+                    <div class="overflow-y-auto flex-1 px-2 pb-2">
+                        <table class="w-full text-left border-collapse table-fixed">
+                            <thead class="sticky top-0 bg-slate-900 z-10">
+                                <tr class="text-[9px] font-bold text-slate-600 uppercase tracking-wider">
+                                    <th class="py-2 px-2 w-8"></th>
+                                    <th class="py-2 px-2 min-w-0">Block</th>
+                                    <th class="py-2 px-2 w-14 text-right">Qty</th>
+                                    <th class="py-2 px-2 w-20 text-right">Stacks</th>
+                                </tr>
+                            </thead>
+                            <tbody id="material-list-body"></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- ── Export Panel ── -->
+                <div id="panel-export" class="hidden p-4 space-y-3">
+                    <p class="text-[10px] text-slate-500 leading-relaxed">
+                        Export schematic data to JSON or CSV for use in spreadsheets or other tools.
+                    </p>
+
+                    <button onclick="downloadAs('json')"
+                            class="w-full flex items-center gap-3 p-3 bg-slate-800/60 hover:bg-slate-700/60 border border-white/5 rounded-xl transition group">
+                        <div class="w-8 h-8 rounded-lg bg-amber-500/15 flex items-center justify-center flex-shrink-0">
+                            <i data-lucide="code" class="w-4 h-4 text-amber-400"></i>
+                        </div>
+                        <div class="text-left">
+                            <p class="text-xs font-bold text-white">Export as JSON</p>
+                            <p class="text-[10px] text-slate-500">All block data and metadata</p>
+                        </div>
+                        <i data-lucide="download" class="w-4 h-4 text-slate-600 ml-auto group-hover:text-slate-400 transition"></i>
+                    </button>
+
+                    <button onclick="downloadAs('csv')"
+                            class="w-full flex items-center gap-3 p-3 bg-slate-800/60 hover:bg-slate-700/60 border border-white/5 rounded-xl transition group">
+                        <div class="w-8 h-8 rounded-lg bg-emerald-500/15 flex items-center justify-center flex-shrink-0">
+                            <i data-lucide="table" class="w-4 h-4 text-emerald-400"></i>
+                        </div>
+                        <div class="text-left">
+                            <p class="text-xs font-bold text-white">Export as CSV</p>
+                            <p class="text-[10px] text-slate-500">Block counts and stack sizes</p>
+                        </div>
+                        <i data-lucide="download" class="w-4 h-4 text-slate-600 ml-auto group-hover:text-slate-400 transition"></i>
+                    </button>
+                </div>
+
+            </div><!-- /scrollable -->
+        </aside><!-- /sidebar -->
+
+    </div><!-- /main area -->
+</div><!-- /app-shell -->
+
+
+<script>
+    /* ─── UI state helpers ─────────────────────────────────── */
+    let sidebarOpen = window.innerWidth >= 768; // closed by default on mobile
+
+    function showViewer() {
+        document.getElementById('landing-screen').classList.add('hidden-out');
+        const shell = document.getElementById('app-shell');
+        shell.classList.add('visible');
+        // Apply initial sidebar state
+        const sb = document.getElementById('sidebar');
+        if (window.innerWidth < 768) {
+            sb.classList.remove('open-mobile');
+        } else {
+            sb.classList.toggle('collapsed', !sidebarOpen);
+        }
+        // Reset pan when new schematic loads
+        window.cameraPan = { x: 0, y: 0, z: 0 };
+        setTimeout(() => {
+            if (typeof renderSchematicVoxelIsometric === 'function') renderSchematicVoxelIsometric();
+        }, 450);
+    }
+
+    function toggleSidebar() {
+        const sb = document.getElementById('sidebar');
+        if (window.innerWidth < 768) {
+            // Mobile: toggle overlay class
+            sb.classList.toggle('open-mobile');
+            sidebarOpen = sb.classList.contains('open-mobile');
+        } else {
+            // Desktop: toggle collapsed
+            sidebarOpen = !sidebarOpen;
+            sb.classList.toggle('collapsed', !sidebarOpen);
+        }
+    }
+
+
+
+    /* ─── Drag & drop on landing ──────────────────────────── */
+    const landingZone = document.getElementById('dropzone-landing');
+    landingZone.addEventListener('dragover',  e => { e.preventDefault(); landingZone.classList.add('drop-active'); });
+    landingZone.addEventListener('dragleave', () => landingZone.classList.remove('drop-active'));
+    landingZone.addEventListener('drop', e => {
+        e.preventDefault();
+        landingZone.classList.remove('drop-active');
+        if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);
+    });
+
+    /* Also handle canvas-area drag & drop while in viewer */
+    const canvasWrapper = document.getElementById('canvas-wrapper');
+    canvasWrapper?.addEventListener('dragover', e => { e.preventDefault(); canvasWrapper.style.outline = '2px solid #2eab5c'; });
+    canvasWrapper?.addEventListener('dragleave', () => canvasWrapper.style.outline = '');
+    canvasWrapper?.addEventListener('drop', e => {
+        e.preventDefault();
+        canvasWrapper.style.outline = '';
+        if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);
+    });
+
+    /* ─── Canvas resize observer ───────────────────────────── */
+    const canvasEl = document.getElementById('preview-canvas');
+    const ro = new ResizeObserver(() => {
+        if (canvasEl.parentElement) {
+            canvasEl.width  = canvasEl.offsetWidth  * (window.devicePixelRatio || 1);
+            canvasEl.height = canvasEl.offsetHeight * (window.devicePixelRatio || 1);
+        }
+        if (typeof renderSchematicVoxelIsometric === 'function') renderSchematicVoxelIsometric();
+    });
+    ro.observe(document.getElementById('canvas-wrapper'));
+
+    lucide.createIcons();
+</script>
+
+<!-- ── Assets & logic scripts ── -->
+<script src="assets/vanilla/atlas-base64.js"></script>
+<script src="assets/tech/atlas-technical-base64.js"></script>
+<script src="assets/opaque.js"></script>
+<script src="assets/assets.js"></script>
+<script src="assets/deepslate-helpers.js"></script>
+
+<script src="js/parser.js"></script>
+<script src="js/entities.js"></script>
+<script src="js/renderer-2d.js"></script>
+<script src="js/renderer-3d.js"></script>
+<script src="js/controller.js"></script>
+
+</body>
+</html>
